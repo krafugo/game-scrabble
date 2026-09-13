@@ -12,6 +12,8 @@ Scrabble Room is a TypeScript/Vite implementation of the classic English Scrabbl
 
 The table shows the 15×15 board, premium squares, current turn, recent play, every score, each opponent’s rack count, and the exact number of tiles left in the bag. The host validates every move and broadcasts each player’s redacted board state; a player sees their own rack but never another player’s letters.
 
+The lobby presents both a large six-character room code and a copyable invite link. The current room and game state are saved in the tab, so refreshing restores the lobby or board and reconnects the same player seat instead of returning to the home page.
+
 The engine includes the standard 100-tile English distribution, TWL dictionary checks, centre-star opening, connected/continuous words, cross-word scoring, premium squares, the 50-point seven-tile bonus, exchanges, passes, and end-of-game leftover-tile scoring. Rooms default to **Friendly** rules (a word may be used once and the centre is neutral), with **Official** rules available in the lobby. Official Scrabble treats the centre star as a double-word square and permits a valid word to be formed again elsewhere.
 
 ## Local development
@@ -36,7 +38,7 @@ npm run preview
 npm run test:browser
 ```
 
-The browser smoke test verifies the lobby and, when the local browser runner permits ICE/WebRTC negotiation, the first game state too. Some sandboxed runners cannot establish two local WebRTC peers; in that case it reports the limitation and leaves the full connection path available for real devices. Set `REQUIRE_WEBRTC=1` to make that condition fail the smoke test.
+The browser smoke test verifies the lobby, prominent code and invite link, lobby refresh, in-progress and finished-game restoration, score/history persistence, and fixed board-cell sizing. When the local browser runner permits ICE/WebRTC negotiation, it also verifies the first shared game state. Some sandboxed runners cannot establish two local WebRTC peers; in that case it reports the limitation and exercises the same restored UI with deterministic saved state. Set `REQUIRE_WEBRTC=1` to make unavailable WebRTC negotiation fail the smoke test.
 
 ## Connection and deployment
 
