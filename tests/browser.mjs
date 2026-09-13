@@ -4,7 +4,14 @@ const executablePath = process.env.PLAYWRIGHT_CHROMIUM || '/Users/krafugo/Librar
 const browser = await chromium.launch({ headless: false, executablePath, args: ['--allow-insecure-localhost', '--disable-dev-shm-usage'] });
 const host = await browser.newPage({ baseURL: 'http://127.0.0.1:5198' });
 const guest = await browser.newPage({ baseURL: 'http://127.0.0.1:5198' });
+const mobile = await browser.newPage({ baseURL: 'http://127.0.0.1:5198', viewport: { width: 390, height: 844 } });
 try {
+  await mobile.goto('/');
+  await mobile.locator('#create-form input[name=name]').fill('Phone host');
+  await mobile.locator('#create-form button[type=submit]').click();
+  await mobile.locator('.room-code-display').waitFor({ timeout: 30_000 });
+  if (await mobile.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)) throw new Error('Room sharing card overflows the phone viewport.');
+
   await host.goto('/');
   await host.locator('#create-form input[name=name]').fill('Host');
   await host.locator('#create-form button[type=submit]').click();
@@ -93,6 +100,7 @@ try {
   }
   console.log('browser smoke and refresh-restoration tests passed');
 } finally {
+  await mobile.close();
   await host.close();
   await guest.close();
   await browser.close();
