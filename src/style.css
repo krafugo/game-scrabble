@@ -47,6 +47,7 @@ button span { margin-left: 8px; font-size: 16px; }
 .notice.success { background: #dceede; color: #245f3e; }
 .notice.error { background: #fae4dc; color: #94472f; }
 .roster-panel { padding: 28px; }
+.rules-control { margin: 15px 0 20px; color: #667066; font-size: 12px; }.rules-control select { width: 100%; margin-top: 7px; border: 1px solid #d3d8cf; border-radius: 10px; background: #fff; color: var(--ink); padding: 11px 12px; outline: none; }.rules-summary { display: grid; gap: 5px; margin: 17px 0 22px; padding: 12px 14px; border-radius: 10px; background: #edf0e9; }.rules-summary strong { font-size: 13px; }.rules-summary small { color: var(--muted); font-size: 11px; line-height: 1.35; }
 .roster-panel h2 { margin-bottom: 21px; }
 .member-list { list-style: none; padding: 0; margin: 0 0 25px; }
 .member-row { min-height: 48px; border-top: 1px solid #e5e7df; display: flex; align-items: center; gap: 11px; }
@@ -57,10 +58,12 @@ button span { margin-left: 8px; font-size: 16px; }
 .connection-dot.online { background: #4d9b61; box-shadow: 0 0 0 3px #dbeedc; }
 .member-state { width: 53px; text-align: right; color: var(--muted); font: 10px 'DM Mono', monospace; text-transform: uppercase; }
 .waiting-pulse { color: var(--muted); font-size: 12px; margin-top: 16px; display: flex; align-items: center; gap: 8px; }
+.retry-button { width: 100%; margin-top: 14px; }
 .waiting-pulse span { width: 8px; height: 8px; border-radius: 100%; background: var(--orange); animation: pulse 1.4s infinite; }
 @keyframes pulse { 50% { opacity: .3; transform: scale(.7); } }
 .game-head { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 32px; }
 .game-head h1 { font-size: clamp(38px, 5.2vw, 65px); margin-bottom: 17px; }
+.game-invite { display: flex; align-items: center; gap: 16px; margin-top: 14px; color: var(--muted); font: 11px 'DM Mono', monospace; letter-spacing: .1em; }.game-invite strong { color: var(--ink); margin-left: 6px; }.game-invite .text-button { font: 11px 'DM Sans', sans-serif; letter-spacing: 0; color: var(--green); }
 .turn-message { margin: 0; color: #607065; font-size: 15px; }
 .turn-dot { display: inline-block; width: 8px; height: 8px; border-radius: 100%; background: var(--orange); margin-right: 8px; }
 .bag-card { display: flex; align-items: center; gap: 12px; padding: 12px 15px; min-width: 160px; background: var(--mint); border-radius: 13px; }
@@ -69,8 +72,8 @@ button span { margin-left: 8px; font-size: 16px; }
 .bag-card small { color: #63806a; font-size: 11px; }
 .game-layout { display: grid; grid-template-columns: minmax(560px, 1fr) 300px; gap: 30px; align-items: start; }
 .board-wrap { min-width: 0; }
-.board { width: min(100%, 690px); aspect-ratio: 1; display: grid; grid-template-columns: repeat(15, 1fr); gap: 3px; padding: 4px; border: 1px solid #cad2c7; background: #c7d0c3; border-radius: 10px; box-shadow: 0 15px 35px rgba(37,66,45,.1); }
-.board-cell { position: relative; border: 0; border-radius: 3px; background: #e7ecdf; color: var(--ink); padding: 0; min-width: 0; display: grid; place-items: center; }
+.board { width: min(100%, 690px); aspect-ratio: 1; display: grid; grid-template-columns: repeat(15, minmax(0, 1fr)); grid-template-rows: repeat(15, minmax(0, 1fr)); gap: 3px; padding: 4px; border: 1px solid #cad2c7; background: #c7d0c3; border-radius: 10px; box-shadow: 0 15px 35px rgba(37,66,45,.1); }
+.board-cell { position: relative; border: 0; border-radius: 3px; background: #e7ecdf; color: var(--ink); padding: 0; min-width: 0; min-height: 0; aspect-ratio: 1; overflow: hidden; display: grid; place-items: center; }
 .board-cell:not(:disabled):hover { background: #cfdfc9; }
 .board-cell small { color: #8e9e8d; font: 500 clamp(6px, 1vw, 10px) 'DM Mono', monospace; }
 .board-cell span { font: 700 clamp(12px, 2.5vw, 24px) 'DM Sans', sans-serif; }
@@ -78,6 +81,7 @@ button span { margin-left: 8px; font-size: 16px; }
 .board-cell.provisional { background: #b8dab9; box-shadow: inset 0 0 0 2px var(--green); }
 .board-cell.premium-tw { background: #e4b5a8; }.board-cell.premium-dw { background: #f2cfcb; }.board-cell.premium-tl { background: #a9c7dc; }.board-cell.premium-dl { background: #c6ddec; }
 .board-cell.occupied.premium-tw, .board-cell.occupied.premium-dw, .board-cell.occupied.premium-tl, .board-cell.occupied.premium-dl { background: #f9e6ad; }
+.board-cell.center-neutral { background: #e7ecdf; }.board-cell.center-neutral:not(:disabled):hover { background: #cfdfc9; }
 .board-legend { display: flex; flex-wrap: wrap; gap: 10px 18px; color: var(--muted); font-size: 11px; padding: 12px 4px; }
 .board-legend span { display: flex; align-items: center; gap: 5px; }.legend-swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }.legend-swatch.tw { background: #d88e7b; }.legend-swatch.dw { background: #efbbb6; }.legend-swatch.tl { background: #8eafc9; }.legend-swatch.dl { background: #b4d2e3; }
 .side-column { display: grid; gap: 18px; }.scores-panel, .history-panel { padding: 22px; }.scores-list { margin-top: 14px; }.score-row { display: flex; align-items: center; gap: 9px; padding: 11px 0; border-top: 1px solid #e6e8e0; }.score-row.active { color: var(--green); }.score-avatar { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: #e7eee4; color: var(--green); font-weight: 700; font-size: 12px; }.score-player { flex: 1; min-width: 0; }.score-player strong { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.score-player strong small { color: var(--orange); font-weight: 500; }.score-player span { color: var(--muted); display: block; font-size: 10px; margin-top: 2px; }.score-row b { font: 500 19px 'DM Mono', monospace; }.history-list { list-style: none; padding: 0; margin: 13px 0 0; }.history-list li { display: grid; grid-template-columns: 1fr 1.2fr auto; gap: 5px; align-items: baseline; padding: 8px 0; border-top: 1px solid #e6e8e0; font-size: 11px; }.history-list li span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.history-list li strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.history-list li b { font: 11px 'DM Mono', monospace; color: var(--green); }.empty-history { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 17px 0 2px; }

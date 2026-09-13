@@ -1,6 +1,7 @@
 import twl from 'scrabble-dictionary/en/twl.txt?raw';
 
 export type Tile = string;
+export type RulesMode = 'official' | 'friendly';
 export type Cell = { letter: string; blank: boolean } | null;
 export type Placement = { row: number; col: number; letter: string; blank?: boolean };
 export type Action =
@@ -14,7 +15,7 @@ export type MoveRecord = {
   placements?: Placement[]; letters?: string[]; bagCount: number; turn: number;
 };
 export type GameState = {
-  version: 1; code: string; started: true; finished: boolean; turnIndex: number; turn: number; passes: number;
+  version: 1; code: string; rules: RulesMode; started: true; finished: boolean; turnIndex: number; turn: number; passes: number;
   board: Cell[][]; bag: Tile[]; players: Player[]; history: MoveRecord[];
 };
 export type PublicState = Omit<GameState, 'bag' | 'players'> & { bagCount: number; players: PlayerView[] };
@@ -54,9 +55,9 @@ export function drawTiles(state: GameState, player: Player, count: number, rando
   const take = Math.min(count, state.bag.length);
   for (let i = 0; i < take; i++) player.rack.push(state.bag.pop() as Tile);
 }
-export function createGame(code: string, members: Array<{ token: string; name: string }>, random = Math.random): GameState {
+export function createGame(code: string, members: Array<{ token: string; name: string }>, random = Math.random, rules: RulesMode = 'official'): GameState {
   const bag = shuffle(makeBag(), random);
-  const state: GameState = { version: 1, code, started: true, finished: false, turnIndex: 0, turn: 1, passes: 0, board: Array.from({ length: 15 }, () => Array<Cell>(15).fill(null)), bag, players: members.slice(0, 4).map(member => ({ token: member.token, name: member.name.slice(0, 20), rack: [], score: 0 })), history: [] };
+  const state: GameState = { version: 1, code, rules, started: true, finished: false, turnIndex: 0, turn: 1, passes: 0, board: Array.from({ length: 15 }, () => Array<Cell>(15).fill(null)), bag, players: members.slice(0, 4).map(member => ({ token: member.token, name: member.name.slice(0, 20), rack: [], score: 0 })), history: [] };
   state.players.forEach(player => drawTiles(state, player, 7, random));
   return state;
 }
@@ -80,13 +81,13 @@ function adjacentToExisting(board: Cell[][], placements: Placement[]) {
   return placements.some(item => [[item.row - 1, item.col], [item.row + 1, item.col], [item.row, item.col - 1], [item.row, item.col + 1]].some(([row, col]) => inBounds(row, col) && board[row][col] && !placed.has(key(row, col))));
 }
 
-function scoreWord(board: Cell[][], cells: Array<[number, number]>, placed: Set<string>) {
+function scoreWord(board: Cell[][], cells: Array<[number, number]>, placed: Set<string>, rules: RulesMode) {
   let points = 0, multiplier = 1;
   for (const [row, col] of cells) {
     const cell = board[row][col] as { letter: string; blank: boolean };
     let letterPoints = cell.blank ? 0 : TILE_VALUES[cell.letter] || 0;
     if (placed.has(key(row, col))) {
-      const kind = premiumAt(row, col);
+      const kind = rules === 'friendly' && row === 7 && col === 7 ? '' : premiumAt(row, col);
       if (kind === 'DL') letterPoints *= 2;
       if (kind === 'TL') letterPoints *= 3;
       if (kind === 'DW') multiplier *= 2;
@@ -153,7 +154,18 @@ export function applyAction(input: GameState, token: string, action: Action, ran
       if (cells.length > 1 && !wordsSeen.has(signature)) { wordsSeen.add(signature); formed.push({ cells, word, score: 0 }); }
     }
     if (!formed.length || formed.some(entry => !isValidWord(entry.word))) { placements.forEach(item => { board[item.row][item.col] = null; }); const bad = formed.find(entry => !isValidWord(entry.word)); return reject(bad ? `“${bad.word}” is not in the Scrabble dictionary.` : 'Your play must form at least one word.'); }
-    formed.forEach(entry => { entry.score = scoreWord(board, entry.cells, placed); });
+    if (state.rules === 'friendly') {
+      const playedWords = new Set(state.history.flatMap(record => record.words.map(word => word.word.toUpperCase())));
+      const wordsThisTurn = new Set<string>();
+      const repeated = formed.find(entry => {
+        const normalized = entry.word.toUpperCase();
+        if (playedWords.has(normalized) || wordsThisTurn.has(normalized)) return true;
+        wordsThisTurn.add(normalized);
+        return false;
+      });
+      if (repeated) { placements.forEach(item => { board[item.row][item.col] = null; }); return reject(`“${repeated.word}” was already played in this room.`); }
+    }
+    formed.forEach(entry => { entry.score = scoreWord(board, entry.cells, placed, state.rules); });
     let total = formed.reduce((sum, entry) => sum + entry.score, 0); if (placements.length === 7) total += 50;
     const indexes = [...used].sort((a, b) => b - a); indexes.forEach(index => player.rack.splice(index, 1));
     drawTiles(state, player, placements.length, random); player.score += total; state.passes = 0;

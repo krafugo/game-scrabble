@@ -1,6 +1,6 @@
 import './style.css';
-import { applyAction, createGame, premiumAt, publicState, TILE_VALUES, type Action, type GameState, type Placement, type PublicState } from './scrabble';
-import { makeRoomInvite, ScrabbleRoom, type RoomMember } from './network';
+import { applyAction, createGame, premiumAt, publicState, TILE_VALUES, type Action, type GameState, type Placement, type PublicState, type RulesMode } from './scrabble';
+import { makeRoomInvite, ScrabbleRoom, type RoomMember, type RoomSettings } from './network';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root is missing.');
@@ -14,20 +14,22 @@ let selectedRackIndex: number | null = null;
 let exchangeSelection = new Set<number>();
 let notice = '';
 let noticeKind: 'info' | 'error' | 'success' = 'info';
+let inviteBootstrapped = false;
 
 const esc = (value: unknown) => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character] || character);
 const setNotice = (message: string, kind: 'info' | 'error' | 'success' = 'info') => { notice = message; noticeKind = kind; render(); };
 const currentViewPlayer = () => view?.players.find(player => player.token === room?.token);
 const isMyTurn = () => !!view && !!room && !view.finished && view.players[view.turnIndex]?.token === room.token;
-const saveSession = () => { if (room) sessionStorage.setItem('scrabble-session', JSON.stringify({ code: room.code, role: room.role, token: room.token, name: room.name })); };
+const saveSession = () => { if (room) { sessionStorage.setItem('scrabble-session', JSON.stringify({ code: room.code, role: room.role, token: room.token, name: room.name })); localStorage.setItem('scrabble-player-name', room.name); } };
+const inviteCode = () => new URLSearchParams(location.hash.slice(1)).get('room')?.trim().toUpperCase() || '';
 
 function roomCallbacks() {
   return {
     status: (_status: string, message: string) => { notice = message; noticeKind = 'info'; render(); },
     error: (message: string) => setNotice(message, 'error'),
-    members: (members: RoomMember[], started: boolean) => {
+    members: (members: RoomMember[], started: boolean, settings: RoomSettings) => {
       if (!room) return;
-      if (!started) { notice = `${members.filter(member => member.connected).length} player${members.length === 1 ? '' : 's'} connected.`; renderLobby(members, false); }
+      if (!started) { notice = `${members.filter(member => member.connected).length} player${members.length === 1 ? '' : 's'} connected.`; renderLobby(members, false, settings); }
     },
     action: (token: string, action: Action) => {
       if (!room || room.role !== 'host' || !engine) return;
@@ -53,9 +55,17 @@ function roomCallbacks() {
 }
 
 function render() {
-  if (!room) renderHome();
+  if (!room) {
+    const code = inviteCode();
+    if (!inviteBootstrapped && code) {
+      inviteBootstrapped = true;
+      const rememberedName = localStorage.getItem('scrabble-player-name') || window.prompt('Enter your name to join this Scrabble room:', '')?.trim() || '';
+      if (rememberedName) { openGuest(rememberedName, code); return; }
+    }
+    renderHome();
+  }
   else if (view) renderGame();
-  else renderLobby(room.members, room.isStarted);
+  else renderLobby(room.members, room.isStarted, { rules: room.rules });
 }
 
 function renderHome() {
@@ -74,37 +84,44 @@ function renderHome() {
 
 function openHost(name: string) {
   room?.close(); engine = null; view = null;
-  room = ScrabbleRoom.createHost(name, undefined, roomCallbacks()); saveSession(); renderLobby(room.members, false);
+  history.replaceState(null, '', location.pathname);
+  room = ScrabbleRoom.createHost(name, undefined, roomCallbacks()); saveSession(); renderLobby(room.members, false, { rules: room.rules });
 }
 
 function openGuest(name: string, code: string) {
   const normalized = code.trim().toUpperCase();
   if (!/^[A-Z0-9]{6}$/.test(normalized)) { setNotice('Enter the six-character room code.', 'error'); return; }
   room?.close(); engine = null; view = null;
-  room = ScrabbleRoom.join(normalized, name, undefined, roomCallbacks()); saveSession(); renderLobby(room.members, false);
+  history.replaceState(null, '', `${location.pathname}#room=${encodeURIComponent(normalized)}`);
+  room = ScrabbleRoom.join(normalized, name, undefined, roomCallbacks()); saveSession(); renderLobby(room.members, false, { rules: room.rules });
 }
 
 function memberRows(members: RoomMember[]) {
   return members.map((member, index) => `<li class="member-row"><span class="member-number">${index + 1}</span><span class="member-name">${esc(member.name)}${member.isHost ? ' <span class="host-tag">HOST</span>' : ''}</span><span class="connection-dot ${member.connected ? 'online' : ''}"></span><span class="member-state">${member.connected ? 'ready' : 'offline'}</span></li>`).join('');
 }
 
-function renderLobby(members: RoomMember[], started: boolean) {
+function renderLobby(members: RoomMember[], started: boolean, settings: RoomSettings = { rules: room?.rules || 'friendly' }) {
   if (!room) return renderHome();
   const activeCount = members.filter(member => member.connected).length;
+  const rulesControl = room.role === 'host'
+    ? `<label class="rules-control">Room rules<select id="rules-mode" ${started ? 'disabled' : ''}><option value="friendly" ${settings.rules === 'friendly' ? 'selected' : ''}>Friendly · unique words, neutral centre</option><option value="official" ${settings.rules === 'official' ? 'selected' : ''}>Official · repeated words, centre double-word</option></select></label>`
+    : `<div class="rules-summary"><span class="muted-label">ROOM RULES</span><strong>${settings.rules === 'friendly' ? 'Friendly room' : 'Official Scrabble'}</strong><small>${settings.rules === 'friendly' ? 'A word can be used once; the centre is neutral.' : 'Repeating a legal word is allowed; the centre doubles the opening word.'}</small></div>`;
   app!.innerHTML = `<main class="shell lobby-shell"><header class="topbar"><button id="leave-room" class="text-button">← Leave room</button><div class="brand">SCRABBLE<span>ROOM</span></div><div class="room-code-label">ROOM <strong>${esc(room.code)}</strong></div></header>
     <section class="lobby-layout"><div class="lobby-copy"><div class="eyebrow">${room.role === 'host' ? 'YOU ARE HOSTING' : 'YOU ARE JOINING'}</div><h1>${room.role === 'host' ? 'Set the table.' : 'You’re almost in.'}</h1><p>${room.role === 'host' ? 'Invite your friends, then start when everyone has joined.' : 'Keep this tab open while the host gathers the table.'}</p><div class="invite-box"><div><span class="muted-label">INVITE LINK</span><strong>${esc(makeRoomInvite(room.code))}</strong></div><button id="copy-invite" class="icon-button" title="Copy invite link">⧉</button></div><div id="lobby-notice" class="notice ${noticeKind}">${esc(notice || (started ? 'Starting game…' : 'Waiting for players…'))}</div></div>
-    <div class="panel roster-panel"><div class="panel-kicker">TABLE · ${activeCount}/4 PLAYERS</div><h2>Who’s playing?</h2><ul class="member-list">${memberRows(members)}</ul>${room.role === 'host' ? `<button id="start-game" class="primary" ${activeCount < 2 || started ? 'disabled' : ''}>${started ? 'Starting…' : activeCount < 2 ? 'Waiting for one more player' : 'Start game'} <span>→</span></button>` : '<div class="waiting-pulse"><span></span> Waiting for the host to start</div>'}<p class="roster-help">${activeCount < 2 ? 'Scrabble needs at least two players.' : 'Up to four players can share this room.'}</p></div></section></main>`;
+    <div class="panel roster-panel"><div class="panel-kicker">TABLE · ${activeCount}/4 PLAYERS</div><h2>Who’s playing?</h2><ul class="member-list">${memberRows(members)}</ul>${rulesControl}${room.role === 'host' ? `<button id="start-game" class="primary" ${activeCount < 2 || started ? 'disabled' : ''}>${started ? 'Starting…' : activeCount < 2 ? 'Waiting for one more player' : 'Start game'} <span>→</span></button>` : '<div class="waiting-pulse"><span></span> Waiting for the host to start</div>'}${room.role === 'guest' && noticeKind === 'error' ? '<button id="retry-connection" class="ghost retry-button">Try connection again</button>' : ''}<p class="roster-help">${activeCount < 2 ? 'Scrabble needs at least two players.' : 'Up to four players can share this room.'}</p></div></section></main>`;
   document.querySelector<HTMLButtonElement>('#leave-room')?.addEventListener('click', leaveRoom);
   document.querySelector<HTMLButtonElement>('#copy-invite')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(makeRoomInvite(room!.code)); setNotice('Invite link copied.', 'success'); } catch { setNotice(makeRoomInvite(room!.code), 'info'); } });
   document.querySelector<HTMLButtonElement>('#start-game')?.addEventListener('click', startGame);
+  document.querySelector<HTMLButtonElement>('#retry-connection')?.addEventListener('click', retryConnection);
+  document.querySelector<HTMLSelectElement>('#rules-mode')?.addEventListener('change', event => room?.setRules((event.currentTarget as HTMLSelectElement).value as RulesMode));
 }
 
 function startGame() {
   if (!room || room.role !== 'host') return;
   const members = room.members.filter(member => member.connected).slice(0, 4).map(member => ({ token: member.token, name: member.name }));
   if (members.length < 2) return setNotice('At least two connected players are required.', 'error');
-  engine = createGame(room.code, members); view = publicState(engine, room.token); room.start();
-  notice = 'Game started — draw your first word through the center star.'; noticeKind = 'success'; renderGame();
+  engine = createGame(room.code, members, Math.random, room.rules); view = publicState(engine, room.token); room.start();
+  notice = room.rules === 'friendly' ? 'Game started — the centre star is neutral and each word may be used once.' : 'Game started — the opening word uses the centre double-word square.'; noticeKind = 'success'; renderGame();
   room.broadcastState(token => publicState(engine as GameState, token));
 }
 
@@ -113,9 +130,11 @@ function boardCell(row: number, col: number) {
   const pendingIndex = pending.findIndex(item => item.row === row && item.col === col);
   const provisional = pending[pendingIndex];
   const label = provisional?.letter || committed?.letter || '';
-  const premium = premiumAt(row, col);
-  const premiumLabel = premium === 'DW' && row === 7 && col === 7 ? '★' : premium;
-  return `<button class="board-cell ${committed ? 'occupied' : ''} ${provisional ? 'provisional' : ''} ${premium ? `premium-${premium.toLowerCase()}` : ''}" data-row="${row}" data-col="${col}" ${!isMyTurn() || (committed && !provisional) ? 'disabled' : ''}><span>${esc(label)}</span>${!label && premiumLabel ? `<small>${premiumLabel}</small>` : ''}</button>`;
+  const center = row === 7 && col === 7;
+  const centerNeutral = center && view?.rules === 'friendly';
+  const premium = centerNeutral ? '' : premiumAt(row, col);
+  const premiumLabel = center ? '★' : premium;
+  return `<button class="board-cell ${committed ? 'occupied' : ''} ${provisional ? 'provisional' : ''} ${centerNeutral ? 'center-neutral' : ''} ${premium ? `premium-${premium.toLowerCase()}` : ''}" data-row="${row}" data-col="${col}" ${!isMyTurn() || (committed && !provisional) ? 'disabled' : ''}><span>${esc(label)}</span>${!label && premiumLabel ? `<small>${premiumLabel}</small>` : ''}</button>`;
 }
 
 function rackHtml() {
@@ -145,7 +164,7 @@ function renderGame() {
   const winners = view.players.filter(player => player.score === topScore);
   const finishHeadline = winners.length > 1 ? 'A tied table.' : `${esc(winners[0]?.name || 'The winner')} wins.`;
   app!.innerHTML = `<main class="shell game-shell"><header class="topbar"><button id="leave-room" class="text-button">← Leave</button><div class="brand">SCRABBLE<span>ROOM</span></div><div class="room-code-label">ROOM <strong>${esc(room.code)}</strong></div></header>
-  <section class="game-head"><div><div class="eyebrow">${view.finished ? 'FINAL BOARD' : `TURN ${view.turn}`}</div><h1>${view.finished ? finishHeadline : `Let’s play, ${esc(room.name)}.`}</h1><p class="turn-message"><span class="turn-dot"></span>${statusLine()}</p></div><div class="bag-card"><span class="bag-icon">▦</span><div><strong>${view.bagCount}</strong><small>letters left in bag</small></div></div></section>
+  <section class="game-head"><div><div class="eyebrow">${view.finished ? 'FINAL BOARD' : `TURN ${view.turn}`}</div><h1>${view.finished ? finishHeadline : `Let’s play, ${esc(room.name)}.`}</h1><p class="turn-message"><span class="turn-dot"></span>${statusLine()}</p><div class="game-invite"><span>ROOM <strong>${esc(room.code)}</strong></span><button id="copy-game-invite" class="text-button">Copy invite link</button></div></div><div class="bag-card"><span class="bag-icon">▦</span><div><strong>${view.bagCount}</strong><small>letters left in bag</small></div></div></section>
   <section class="game-layout"><div class="board-wrap"><div class="board" aria-label="Scrabble board">${Array.from({ length: 15 }, (_, row) => Array.from({ length: 15 }, (_, col) => boardCell(row, col)).join('')).join('')}</div><div class="board-legend"><span><i class="legend-swatch tw"></i>Triple word</span><span><i class="legend-swatch dw"></i>Double word</span><span><i class="legend-swatch tl"></i>Triple letter</span><span><i class="legend-swatch dl"></i>Double letter</span></div></div>
   <aside class="side-column"><div class="panel scores-panel"><div class="panel-kicker">SCOREBOARD</div><div class="scores-list">${view.players.map(player => `<div class="score-row ${player.token === active.token ? 'active' : ''}"><div class="score-avatar">${esc(player.name.slice(0, 1).toUpperCase())}</div><div class="score-player"><strong>${esc(player.name)}${player.token === room!.token ? ' <small>(you)</small>' : ''}</strong><span>${player.token === active.token && !view!.finished ? 'playing now' : `${player.rackCount} tile${player.rackCount === 1 ? '' : 's'} left`}</span></div><b>${player.score}</b></div>`).join('')}</div></div><div class="panel history-panel"><div class="panel-kicker">RECENT PLAYS</div>${recent.length ? `<ul class="history-list">${recent.map(move => `<li><span>${esc(move.playerName)}</span><strong>${move.type === 'place' ? (move.words.map(word => word.word).join(' · ') || 'word') : move.type === 'exchange' ? 'exchanged' : 'passed'}</strong><b>${move.score ? `+${move.score}` : '—'}</b></li>`).join('')}</ul>` : '<p class="empty-history">The first word starts at the star.</p>'}</div></aside></section>
   <section class="play-panel"><div class="rack-header"><div><div class="panel-kicker">YOUR RACK</div><h2>${own?.rackCount || 0} tiles <span>· click a tile, then a square</span></h2></div><div class="notice ${noticeKind}">${esc(notice || statusLine())}</div></div><div class="rack">${rackHtml()}</div><div class="play-controls"><button id="play-word" class="primary" ${!isMyTurn() || !pending.length || view.finished ? 'disabled' : ''}>Play word <span>→</span></button><button id="clear-word" class="secondary" ${!pending.length ? 'disabled' : ''}>Clear</button><button id="pass-turn" class="ghost" ${!isMyTurn() || view.finished ? 'disabled' : ''}>Pass</button><button id="exchange-tiles" class="ghost" ${!isMyTurn() || !exchangeSelection.size || view.finished ? 'disabled' : ''}>Exchange ${exchangeSelection.size ? `(${exchangeSelection.size})` : ''}</button></div><p class="rack-hint">Hold <kbd>Shift</kbd> while clicking tiles to select letters to exchange. Blank tiles score zero.</p></section></main>`;
@@ -154,6 +173,7 @@ function renderGame() {
 
 function bindGameEvents() {
   document.querySelector<HTMLButtonElement>('#leave-room')?.addEventListener('click', leaveRoom);
+  document.querySelector<HTMLButtonElement>('#copy-game-invite')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(makeRoomInvite(room!.code)); setNotice('Invite link copied.', 'success'); } catch { setNotice(makeRoomInvite(room!.code), 'info'); } });
   document.querySelectorAll<HTMLButtonElement>('[data-rack-index]').forEach(button => button.addEventListener('click', event => {
     const index = Number((event.currentTarget as HTMLButtonElement).dataset.rackIndex); const mouse = event as MouseEvent;
     if (mouse.shiftKey || mouse.metaKey || mouse.ctrlKey) { exchangeSelection.has(index) ? exchangeSelection.delete(index) : exchangeSelection.add(index); selectedRackIndex = null; }
@@ -182,6 +202,13 @@ function sendAction(action: Action) {
   } else {
     room.sendAction(action); notice = 'Play sent — waiting for the host to confirm it.'; noticeKind = 'info'; renderGame();
   }
+}
+
+function retryConnection() {
+  if (!room || room.role !== 'guest') return;
+  const { code, name } = room;
+  room.close(); room = null; engine = null; view = null; notice = 'Retrying the room connection…'; noticeKind = 'info';
+  openGuest(name, code);
 }
 
 function leaveRoom() {
