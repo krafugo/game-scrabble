@@ -1,0 +1,26 @@
+{
+  "name": "game-scrabble",
+  "version": "1.0.0",
+  "description": "A peer-to-peer Scrabble room for 2–4 players",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5197 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 5198 --strictPort",
+    "test": "node --loader ./tests/raw-loader.mjs --import tsx --test tests/*.test.ts",
+    "test:browser": "node --import tsx tests/browser.mjs"
+  },
+  "type": "module",
+  "dependencies": {
+    "peerjs": "^1.5.5",
+    "scrabble-dictionary": "^1.0.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^26.5.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.0",
+    "vite-plugin-pwa": "^1.3.0"
+  }
+}
