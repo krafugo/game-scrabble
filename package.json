@@ -1,6 +1,6 @@
 {
   "name": "game-scrabble",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "A peer-to-peer Scrabble room for 2–4 players",
   "private": true,
   "scripts": {

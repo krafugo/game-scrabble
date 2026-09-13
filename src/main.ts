@@ -1,6 +1,6 @@
 import './style.css';
 import { applyAction, createGame, premiumAt, publicState, TILE_VALUES, type Action, type GameState, type Placement, type PublicState, type RulesMode } from './scrabble';
-import { makeRoomInvite, ScrabbleRoom, type RoomMember, type RoomSettings } from './network';
+import { makeRoomInvite, ScrabbleRoom, type RoomMember, type RoomSettings, type RoomSnapshot } from './network';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root is missing.');
@@ -15,21 +15,42 @@ let exchangeSelection = new Set<number>();
 let notice = '';
 let noticeKind: 'info' | 'error' | 'success' = 'info';
 let inviteBootstrapped = false;
+let restoringSession = false;
+
+type SavedSession = {
+  version: 2;
+  room: RoomSnapshot;
+  engine: GameState | null;
+  view: PublicState | null;
+};
 
 const esc = (value: unknown) => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character] || character);
 const setNotice = (message: string, kind: 'info' | 'error' | 'success' = 'info') => { notice = message; noticeKind = kind; render(); };
 const currentViewPlayer = () => view?.players.find(player => player.token === room?.token);
 const isMyTurn = () => !!view && !!room && !view.finished && view.players[view.turnIndex]?.token === room.token;
-const saveSession = () => { if (room) { sessionStorage.setItem('scrabble-session', JSON.stringify({ code: room.code, role: room.role, token: room.token, name: room.name })); localStorage.setItem('scrabble-player-name', room.name); } };
+const saveSession = () => {
+  if (!room) return;
+  const saved: SavedSession = { version: 2, room: room.snapshot, engine: room.role === 'host' ? engine : null, view };
+  sessionStorage.setItem('scrabble-session', JSON.stringify(saved));
+  localStorage.setItem('scrabble-player-name', room.name);
+};
 const inviteCode = () => new URLSearchParams(location.hash.slice(1)).get('room')?.trim().toUpperCase() || '';
 
 function roomCallbacks() {
   return {
-    status: (_status: string, message: string) => { notice = message; noticeKind = 'info'; render(); },
+    status: (_status: string, message: string) => { notice = message; noticeKind = 'info'; if (!restoringSession) render(); },
     error: (message: string) => setNotice(message, 'error'),
     members: (members: RoomMember[], started: boolean, settings: RoomSettings) => {
       if (!room) return;
-      if (!started) { notice = `${members.filter(member => member.connected).length} player${members.length === 1 ? '' : 's'} connected.`; renderLobby(members, false, settings); }
+      saveSession();
+      if (!started) {
+        const connected = members.filter(member => member.connected).length;
+        notice = `${connected} player${connected === 1 ? '' : 's'} connected.`;
+        renderLobby(members, false, settings);
+      } else if (view) {
+        renderGame();
+        if (room.role === 'host' && engine) room.broadcastState(tokenFor => publicState(engine as GameState, tokenFor));
+      }
     },
     action: (token: string, action: Action) => {
       if (!room || room.role !== 'host' || !engine) return;
@@ -40,6 +61,7 @@ function roomCallbacks() {
       pending = []; pendingRackIndexes = []; selectedRackIndex = null; exchangeSelection.clear();
       notice = result.move.type === 'place' ? `${result.move.playerName} scored ${result.move.score} point${result.move.score === 1 ? '' : 's'}.` : `${result.move.playerName} ${result.move.type === 'pass' ? 'passed.' : 'exchanged letters.'}`;
       noticeKind = 'success';
+      saveSession();
       renderGame();
       room.broadcastState(tokenFor => publicState(engine as GameState, tokenFor));
     },
@@ -49,6 +71,7 @@ function roomCallbacks() {
       pending = []; pendingRackIndexes = []; selectedRackIndex = null; exchangeSelection.clear();
       notice = view.finished ? 'Game over — final scores are shown below.' : 'The board was updated.';
       noticeKind = 'success';
+      saveSession();
       renderGame();
     },
   };
@@ -66,6 +89,33 @@ function render() {
   }
   else if (view) renderGame();
   else renderLobby(room.members, room.isStarted, { rules: room.rules });
+}
+
+function restoreSavedSession() {
+  const raw = sessionStorage.getItem('scrabble-session');
+  if (!raw) return false;
+  try {
+    const saved = JSON.parse(raw) as Partial<SavedSession>;
+    if (saved.version !== 2 || !saved.room || !/^[A-Z0-9]{6}$/.test(saved.room.code) || !saved.room.token || !saved.room.name) throw new Error('Invalid saved room');
+    const linkedRoom = inviteCode();
+    if (linkedRoom && linkedRoom !== saved.room.code) return false;
+    if (saved.room.started && saved.room.role === 'host' && !saved.engine) throw new Error('Missing host game state');
+    if (saved.room.started && !saved.view && saved.room.role === 'guest') throw new Error('Missing guest game state');
+    restoringSession = true;
+    inviteBootstrapped = true;
+    engine = saved.room.role === 'host' ? saved.engine || null : null;
+    view = saved.room.role === 'host' && engine ? publicState(engine, saved.room.token) : saved.view || null;
+    room = ScrabbleRoom.restore(saved.room, roomCallbacks());
+    restoringSession = false;
+    notice = saved.room.started ? 'Restored your game — reconnecting the table…' : 'Restored your room — reconnecting players…';
+    noticeKind = 'info';
+    render();
+    return true;
+  } catch {
+    restoringSession = false;
+    sessionStorage.removeItem('scrabble-session');
+    return false;
+  }
 }
 
 function renderHome() {
@@ -107,9 +157,10 @@ function renderLobby(members: RoomMember[], started: boolean, settings: RoomSett
     ? `<label class="rules-control">Room rules<select id="rules-mode" ${started ? 'disabled' : ''}><option value="friendly" ${settings.rules === 'friendly' ? 'selected' : ''}>Friendly · unique words, neutral centre</option><option value="official" ${settings.rules === 'official' ? 'selected' : ''}>Official · repeated words, centre double-word</option></select></label>`
     : `<div class="rules-summary"><span class="muted-label">ROOM RULES</span><strong>${settings.rules === 'friendly' ? 'Friendly room' : 'Official Scrabble'}</strong><small>${settings.rules === 'friendly' ? 'A word can be used once; the centre is neutral.' : 'Repeating a legal word is allowed; the centre doubles the opening word.'}</small></div>`;
   app!.innerHTML = `<main class="shell lobby-shell"><header class="topbar"><button id="leave-room" class="text-button">← Leave room</button><div class="brand">SCRABBLE<span>ROOM</span></div><div class="room-code-label">ROOM <strong>${esc(room.code)}</strong></div></header>
-    <section class="lobby-layout"><div class="lobby-copy"><div class="eyebrow">${room.role === 'host' ? 'YOU ARE HOSTING' : 'YOU ARE JOINING'}</div><h1>${room.role === 'host' ? 'Set the table.' : 'You’re almost in.'}</h1><p>${room.role === 'host' ? 'Invite your friends, then start when everyone has joined.' : 'Keep this tab open while the host gathers the table.'}</p><div class="invite-box"><div><span class="muted-label">INVITE LINK</span><strong>${esc(makeRoomInvite(room.code))}</strong></div><button id="copy-invite" class="icon-button" title="Copy invite link">⧉</button></div><div id="lobby-notice" class="notice ${noticeKind}">${esc(notice || (started ? 'Starting game…' : 'Waiting for players…'))}</div></div>
+    <section class="lobby-layout"><div class="lobby-copy"><div class="eyebrow">${room.role === 'host' ? 'YOU ARE HOSTING' : 'YOU ARE JOINING'}</div><h1>${room.role === 'host' ? 'Set the table.' : 'You’re almost in.'}</h1><p>${room.role === 'host' ? 'Invite your friends, then start when everyone has joined.' : 'Keep this tab open while the host gathers the table.'}</p><div class="room-share-card"><div class="room-code-display"><div><span class="muted-label">ROOM CODE</span><strong>${esc(room.code)}</strong></div><button id="copy-room-code" class="secondary" type="button">Copy code</button></div><div class="invite-box"><div><span class="muted-label">INVITE LINK</span><strong>${esc(makeRoomInvite(room.code))}</strong></div><button id="copy-invite" class="icon-button" title="Copy invite link">⧉</button></div></div><div id="lobby-notice" class="notice ${noticeKind}">${esc(notice || (started ? 'Starting game…' : 'Waiting for players…'))}</div></div>
     <div class="panel roster-panel"><div class="panel-kicker">TABLE · ${activeCount}/4 PLAYERS</div><h2>Who’s playing?</h2><ul class="member-list">${memberRows(members)}</ul>${rulesControl}${room.role === 'host' ? `<button id="start-game" class="primary" ${activeCount < 2 || started ? 'disabled' : ''}>${started ? 'Starting…' : activeCount < 2 ? 'Waiting for one more player' : 'Start game'} <span>→</span></button>` : '<div class="waiting-pulse"><span></span> Waiting for the host to start</div>'}${room.role === 'guest' && noticeKind === 'error' ? '<button id="retry-connection" class="ghost retry-button">Try connection again</button>' : ''}<p class="roster-help">${activeCount < 2 ? 'Scrabble needs at least two players.' : 'Up to four players can share this room.'}</p></div></section></main>`;
   document.querySelector<HTMLButtonElement>('#leave-room')?.addEventListener('click', leaveRoom);
+  document.querySelector<HTMLButtonElement>('#copy-room-code')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(room!.code); setNotice('Room code copied.', 'success'); } catch { setNotice(`Room code: ${room!.code}`, 'info'); } });
   document.querySelector<HTMLButtonElement>('#copy-invite')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(makeRoomInvite(room!.code)); setNotice('Invite link copied.', 'success'); } catch { setNotice(makeRoomInvite(room!.code), 'info'); } });
   document.querySelector<HTMLButtonElement>('#start-game')?.addEventListener('click', startGame);
   document.querySelector<HTMLButtonElement>('#retry-connection')?.addEventListener('click', retryConnection);
@@ -121,7 +172,7 @@ function startGame() {
   const members = room.members.filter(member => member.connected).slice(0, 4).map(member => ({ token: member.token, name: member.name }));
   if (members.length < 2) return setNotice('At least two connected players are required.', 'error');
   engine = createGame(room.code, members, Math.random, room.rules); view = publicState(engine, room.token); room.start();
-  notice = room.rules === 'friendly' ? 'Game started — the centre star is neutral and each word may be used once.' : 'Game started — the opening word uses the centre double-word square.'; noticeKind = 'success'; renderGame();
+  notice = room.rules === 'friendly' ? 'Game started — the centre star is neutral and each word may be used once.' : 'Game started — the opening word uses the centre double-word square.'; noticeKind = 'success'; saveSession(); renderGame();
   room.broadcastState(token => publicState(engine as GameState, token));
 }
 
@@ -215,4 +266,5 @@ function leaveRoom() {
   room?.close(); room = null; engine = null; view = null; pending = []; pendingRackIndexes = []; exchangeSelection.clear(); sessionStorage.removeItem('scrabble-session'); history.replaceState(null, '', location.pathname); renderHome();
 }
 
-render();
+window.addEventListener('pagehide', () => room?.close());
+if (!restoreSavedSession()) render();

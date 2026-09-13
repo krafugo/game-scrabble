@@ -3,6 +3,15 @@ import type { Action, RulesMode } from './scrabble';
 
 export type RoomMember = { token: string; name: string; isHost: boolean; connected: boolean };
 export type RoomSettings = { rules: RulesMode };
+export type RoomSnapshot = {
+  code: string;
+  role: 'host' | 'guest';
+  token: string;
+  name: string;
+  members: RoomMember[];
+  started: boolean;
+  settings: RoomSettings;
+};
 export type ConnectionStatus = 'starting' | 'open' | 'connecting' | 'ready' | 'closed' | 'error';
 
 type WireMessage =
@@ -39,7 +48,6 @@ const config = () => {
 };
 
 const peerIdFor = (code: string) => `scrabble-${code.toLowerCase()}`;
-const guestIdFor = (token: string) => `scrabble-player-${token.toLowerCase()}`;
 const randomToken = () => crypto.randomUUID().replaceAll('-', '').slice(0, 12);
 const safeCode = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 
@@ -65,16 +73,23 @@ export class ScrabbleRoom {
   private heartbeat?: number;
   private guestAttempts = 0;
   private guestRetryTimer?: number;
+  private closing = false;
 
-  private constructor(code: string, role: 'host' | 'guest', token: string, name: string, callbacks: RoomCallbacks, settings: RoomSettings) {
+  private constructor(code: string, role: 'host' | 'guest', token: string, name: string, callbacks: RoomCallbacks, settings: RoomSettings, restored?: Pick<RoomSnapshot, 'members' | 'started'>) {
     this.code = code;
     this.role = role;
     this.token = token;
     this.name = name;
     this.callbacks = callbacks;
     this.settings = { rules: settings.rules };
-    this.membersList = [{ token, name, isHost: role === 'host', connected: true }];
-    this.peer = role === 'host' ? new Peer(peerIdFor(code), config()) : new Peer(guestIdFor(token), config());
+    this.started = restored?.started || false;
+    this.membersList = restored?.members?.length
+      ? restored.members.map(member => ({ ...member, connected: member.token === token }))
+      : [{ token, name, isHost: role === 'host', connected: true }];
+    // Guests use an ephemeral signaling ID. Their stable player token travels in
+    // connection metadata, so a refreshed tab can reconnect without waiting for
+    // its previous PeerJS ID to expire.
+    this.peer = role === 'host' ? new Peer(peerIdFor(code), config()) : new Peer(config());
     this.bindPeer();
   }
 
@@ -86,9 +101,16 @@ export class ScrabbleRoom {
     return new ScrabbleRoom(code.trim().toUpperCase(), 'guest', token, name.trim() || 'Player', callbacks, { rules: 'friendly' });
   }
 
+  static restore(snapshot: RoomSnapshot, callbacks: RoomCallbacks = {}) {
+    return new ScrabbleRoom(snapshot.code, snapshot.role, snapshot.token, snapshot.name, callbacks, snapshot.settings, snapshot);
+  }
+
   get members() { return this.membersList.slice(); }
   get isStarted() { return this.started; }
   get rules() { return this.settings.rules; }
+  get snapshot(): RoomSnapshot {
+    return { code: this.code, role: this.role, token: this.token, name: this.name, members: this.members, started: this.started, settings: { ...this.settings } };
+  }
 
   private report(status: ConnectionStatus, message: string) { this.callbacks.status?.(status, message); }
 
@@ -112,13 +134,18 @@ export class ScrabbleRoom {
       this.report('error', message);
       this.callbacks.error?.(message);
     });
-    this.peer.on('disconnected', () => { this.report('connecting', 'Reconnecting to the signaling service…'); this.peer.reconnect(); });
+    this.peer.on('disconnected', () => {
+      if (this.closing) return;
+      this.report('connecting', 'Reconnecting to the signaling service…');
+      this.peer.reconnect();
+    });
     this.peer.on('close', () => this.report('closed', 'The room connection closed.'));
   }
 
   private connectGuest() {
     if (this.role !== 'guest' || this.peer.destroyed) return;
     if (this.guestRetryTimer) window.clearTimeout(this.guestRetryTimer);
+    this.guestRetryTimer = undefined;
     this.guestAttempts++;
     const connection = this.peer.connect(peerIdFor(this.code), { reliable: true, metadata: { version: 1, code: this.code, token: this.token, name: this.name } });
     this.bindConnection(connection, true);
@@ -126,13 +153,22 @@ export class ScrabbleRoom {
       if (connection.open || this.peer.destroyed) return;
       connection.close();
       if (this.guestAttempts < 4) {
-        this.report('connecting', `The room is taking a moment — retrying (${this.guestAttempts}/3)…`);
-        this.connectGuest();
+        this.report('connecting', `The room is taking a moment — retrying (${this.guestAttempts})…`);
       } else {
-        this.report('error', `Could not connect to peer ${peerIdFor(this.code)}. Keep the host tab open and try joining again.`);
-        this.callbacks.error?.(`Could not connect to peer ${peerIdFor(this.code)}. Keep the host tab open and try joining again.`);
+        this.report('error', `Still trying to reach room ${this.code}. Keep the host tab open.`);
+        this.callbacks.error?.(`Still trying to reach room ${this.code}. Keep the host tab open.`);
       }
+      this.scheduleGuestReconnect();
     }, 8_000);
+  }
+
+  private scheduleGuestReconnect(delay = 750) {
+    if (this.role !== 'guest' || this.closing || this.peer.destroyed) return;
+    if (this.guestRetryTimer) window.clearTimeout(this.guestRetryTimer);
+    this.guestRetryTimer = window.setTimeout(() => {
+      this.guestRetryTimer = undefined;
+      this.connectGuest();
+    }, delay);
   }
 
   private bindConnection(connection: DataConnection, outgoing: boolean) {
@@ -141,23 +177,36 @@ export class ScrabbleRoom {
       if (this.role === 'guest' && outgoing) {
         this.guestAttempts = 0;
         if (this.guestRetryTimer) window.clearTimeout(this.guestRetryTimer);
+        this.guestRetryTimer = undefined;
         this.connections.set('host', connection);
         this.send(connection, { type: 'hello', version: 1, code: this.code, token: this.token, name: this.name });
       }
       if (this.role === 'host' && !outgoing) {
         const token = String(metadata.token || '');
         const name = String(metadata.name || 'Player').slice(0, 20);
-        if (!token || metadata.code !== this.code || this.started || this.membersList.filter(member => member.connected).length >= 4 || this.membersList.some(member => member.token === token)) {
+        const returningMember = this.membersList.find(member => member.token === token);
+        const cannotJoin = !returningMember && (this.started || this.membersList.length >= 4);
+        if (!token || metadata.code !== this.code || cannotJoin) {
           this.send(connection, { type: 'reject', message: this.started ? 'This game has already started.' : 'This room is full.' });
           connection.close();
           return;
         }
+        const previous = this.connections.get(token);
+        if (previous && previous !== connection) {
+          this.connections.delete(token);
+          previous.close();
+        }
         this.connections.set(token, connection);
-        this.membersList.push({ token, name, isHost: false, connected: true });
+        if (returningMember) {
+          returningMember.name = name;
+          returningMember.connected = true;
+        } else {
+          this.membersList.push({ token, name, isHost: false, connected: true });
+        }
         this.send(connection, { type: 'welcome', members: this.members, started: this.started, settings: this.settings });
         this.broadcastLobby();
         this.callbacks.members?.(this.members, this.started, this.settings);
-        this.report('ready', `${name} joined the room.`);
+        this.report('ready', returningMember ? `${name} reconnected.` : `${name} joined the room.`);
       }
       if (this.role === 'guest') this.report('ready', `Connected to ${this.code}.`);
     });
@@ -170,11 +219,15 @@ export class ScrabbleRoom {
         this.callbacks.members?.(this.members, this.started, this.settings);
         this.report('closed', member ? `${member.name} disconnected.` : 'A player disconnected.');
       }
+      if (this.role === 'guest' && outgoing && !this.closing && !this.peer.destroyed) {
+        this.report('connecting', 'The host connection was interrupted — reconnecting…');
+        this.scheduleGuestReconnect();
+      }
     });
     connection.on('error', error => {
       const message = error instanceof Error ? error.message : String(error);
       this.callbacks.error?.(message);
-      if (this.role === 'guest' && outgoing && !connection.open && this.guestAttempts < 4) this.guestRetryTimer = window.setTimeout(() => this.connectGuest(), 500);
+      if (this.role === 'guest' && outgoing && !connection.open) this.scheduleGuestReconnect(500);
     });
   }
 
@@ -235,6 +288,8 @@ export class ScrabbleRoom {
   }
 
   close() {
+    if (this.closing) return;
+    this.closing = true;
     if (this.heartbeat) window.clearInterval(this.heartbeat);
     if (this.guestRetryTimer) window.clearTimeout(this.guestRetryTimer);
     this.connections.forEach(connection => connection.close());
