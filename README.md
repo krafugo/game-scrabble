@@ -12,7 +12,7 @@ Scrabble Room is a TypeScript/Vite implementation of the classic English Scrabbl
 
 The table shows the 15×15 board, premium squares, current turn, recent play, every score, each opponent’s rack count, and the exact number of tiles left in the bag. The host validates every move and broadcasts each player’s redacted board state; a player sees their own rack but never another player’s letters.
 
-The engine includes the standard 100-tile English distribution, TWL dictionary checks, centre-star opening, connected/continuous words, cross-word scoring, premium squares, the 50-point seven-tile bonus, exchanges, passes, and end-of-game leftover-tile scoring.
+The engine includes the standard 100-tile English distribution, TWL dictionary checks, centre-star opening, connected/continuous words, cross-word scoring, premium squares, the 50-point seven-tile bonus, exchanges, passes, and end-of-game leftover-tile scoring. Rooms default to **Friendly** rules (a word may be used once and the centre is neutral), with **Official** rules available in the lobby. Official Scrabble treats the centre star as a double-word square and permits a valid word to be formed again elsewhere.
 
 ## Local development
 
