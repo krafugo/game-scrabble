@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2 — Persistent rooms
+
+- Added a prominent, copyable room-code card alongside the invite link.
+- Restored host and guest lobbies, active games, and finished games after a browser refresh.
+- Reconnected returning player seats without admitting duplicate players.
+- Expanded browser coverage for room sharing, refresh recovery, board sizing, scores, and history.
+
 ## 1.0.1 — Rules and room fixes
 
 - Added selectable Official/Friendly rules and corrected premium-square lifecycle.
