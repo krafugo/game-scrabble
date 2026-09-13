@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3 — Mobile room card fix
+
+- Kept the room-code and invite card within narrow phone viewports, including the longer GitHub Pages URL.
+
 ## 1.0.2 — Persistent rooms
 
 - Added a prominent, copyable room-code card alongside the invite link.
