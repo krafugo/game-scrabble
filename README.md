@@ -42,6 +42,8 @@ The browser smoke test verifies the lobby, prominent code and invite link, lobby
 
 ## Connection and deployment
 
-GitHub Pages serves the static assets. PeerJS is used only for signaling and WebRTC data-channel setup; the host browser is the authoritative game coordinator and must remain open during a game. `public/connection-config.js` can be edited to point at a private PeerServer and/or TURN service when a managed signaling path is preferred. The default public PeerJS signaling endpoint plus Google’s public STUN service are suitable for casual play, but restrictive corporate networks may require TURN.
+GitHub Pages serves the static assets. Rooms come from **[peer-room](https://github.com/krafugo/peer-room)**: the host coordinates the table over a WebRTC data channel when a direct path exists (PeerJS signalling, free STUN, optional probed TURN relays) and over an encrypted store-and-forward relay on public MQTT brokers when it does not. Each guest's redacted state is sealed for that guest alone, so one player cannot read another's rack even on the relay. Seats live in the browser's storage: a refresh, a killed tab or the invite link rejoins the same seat, the host's game state is restored, and an action replayed after a host reload is ignored. The host must still be online for a move to be validated; a guest's action made while the host is away is delivered when the host returns.
+
+`public/connection-config.js` documents the STUN, TURN, broker and PeerServer options. The defaults are shared public services suitable for casual play, with no uptime guarantee from this project.
 
 The `main` branch is published by `.github/workflows/pages.yml`. The `develop` branch is the integration branch; feature commits are merged into a release commit on `main` following a Git-flow-style history.
