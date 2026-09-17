@@ -1,5 +1,14 @@
-import { DataConnection, Peer } from 'peerjs';
+// Rooms ride on peer-room: a WebRTC data channel when a path exists and an
+// encrypted relay over public MQTT brokers when it does not, seats that
+// survive reloads, and a stored message for a player who is offline. This
+// file adapts that library to the shape the rest of the app expects: the
+// host coordinates the table, guests send actions, the host sends each
+// guest its own redacted state.
+import { Room, createSeat, type ConnectionSettings, type Member, type Seat } from 'peer-room';
 import type { Action, RulesMode } from './scrabble';
+
+export const APP = 'scrabble';
+export const MAX_SEATS = 4;
 
 export type RoomMember = { token: string; name: string; isHost: boolean; connected: boolean };
 export type RoomSettings = { rules: RulesMode };
@@ -11,289 +20,140 @@ export type RoomSnapshot = {
   members: RoomMember[];
   started: boolean;
   settings: RoomSettings;
+  /** The peer-room seat: identity and keys. Without it a saved room cannot rejoin. */
+  seat: Seat;
 };
 export type ConnectionStatus = 'starting' | 'open' | 'connecting' | 'ready' | 'closed' | 'error';
-
-type WireMessage =
-  | { type: 'hello'; version: 1; code: string; token: string; name: string }
-  | { type: 'welcome'; members: RoomMember[]; started: boolean; settings: RoomSettings }
-  | { type: 'lobby'; members: RoomMember[]; started: boolean; settings: RoomSettings }
-  | { type: 'action'; action: Action }
-  | { type: 'state'; state: unknown }
-  | { type: 'reject'; message: string }
-  | { type: 'ping'; at: number }
-  | { type: 'pong'; at: number };
-
-type ConnectionConfig = {
-  peerServer?: Record<string, unknown>;
-  iceServers?: Array<Record<string, unknown>>;
-};
+/** What the host announces with its seat so guests learn the table's rules and whether the game began. */
+type HostMeta = { started: boolean; rules: RulesMode };
+type ActionMessage = { id: string; action: Action };
 
 declare global {
-  interface Window {
-    SCRABBLE_CONNECTION?: ConnectionConfig;
-  }
+  interface Window { SCRABBLE_CONNECTION?: ConnectionSettings; }
 }
 
-const config = () => {
-  const source = window.SCRABBLE_CONNECTION || {};
-  return {
-    ...(source.peerServer || {}),
-    debug: 0,
-    config: { iceServers: source.iceServers || [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478', 'turn:eu-0.turn.peerjs.com:443?transport=tcp', 'turn:us-0.turn.peerjs.com:443?transport=tcp'], username: 'peerjs', credential: 'peerjsp' },
-    ], sdpSemantics: 'unified-plan' },
-  };
-};
-
-const peerIdFor = (code: string) => `scrabble-${code.toLowerCase()}`;
-const randomToken = () => crypto.randomUUID().replaceAll('-', '').slice(0, 12);
 const safeCode = () => Math.random().toString(36).slice(2, 8).toUpperCase();
+const STATUS: Record<string, ConnectionStatus> = { connecting: 'starting', waiting: 'open', connected: 'ready', offline: 'connecting', rejected: 'error', left: 'closed' };
 
 export type RoomCallbacks = {
-  status?: (status: ConnectionStatus, message: string) => void;
+  status?: (status: ConnectionStatus, message: string, path?: 'direct' | 'relay' | 'none') => void;
   members?: (members: RoomMember[], started: boolean, settings: RoomSettings) => void;
-  action?: (token: string, action: Action) => void;
+  /** Host only. `id` is unique per action so a replay after a reload can be ignored. */
+  action?: (token: string, action: Action, id: string) => void;
   state?: (state: unknown) => void;
   error?: (message: string) => void;
 };
 
 export class ScrabbleRoom {
-  readonly code: string;
-  readonly role: 'host' | 'guest';
-  readonly token: string;
-  readonly name: string;
-  readonly peer: Peer;
+  readonly seat: Seat;
   private readonly callbacks: RoomCallbacks;
-  private readonly connections = new Map<string, DataConnection>();
+  private room: Room | null = null;
   private membersList: RoomMember[];
   private settings: RoomSettings;
   private started = false;
-  private heartbeat?: number;
-  private guestAttempts = 0;
-  private guestRetryTimer?: number;
-  private closing = false;
+  private closed = false;
+  private queue: Array<() => void> = [];
 
-  private constructor(code: string, role: 'host' | 'guest', token: string, name: string, callbacks: RoomCallbacks, settings: RoomSettings, restored?: Pick<RoomSnapshot, 'members' | 'started'>) {
-    this.code = code;
-    this.role = role;
-    this.token = token;
-    this.name = name;
+  private constructor(seat: Seat, callbacks: RoomCallbacks, settings: RoomSettings, restored?: Pick<RoomSnapshot, 'members' | 'started'>) {
+    this.seat = seat;
     this.callbacks = callbacks;
     this.settings = { rules: settings.rules };
     this.started = restored?.started || false;
     this.membersList = restored?.members?.length
-      ? restored.members.map(member => ({ ...member, connected: member.token === token }))
-      : [{ token, name, isHost: role === 'host', connected: true }];
-    // Guests use an ephemeral signaling ID. Their stable player token travels in
-    // connection metadata, so a refreshed tab can reconnect without waiting for
-    // its previous PeerJS ID to expire.
-    this.peer = role === 'host' ? new Peer(peerIdFor(code), config()) : new Peer(config());
-    this.bindPeer();
+      ? restored.members.map(member => ({ ...member, connected: member.token === seat.token }))
+      : [{ token: seat.token, name: seat.name, isHost: seat.role === 'host', connected: true }];
+    if (seat.role === 'host') seat.meta = { started: this.started, rules: this.settings.rules } satisfies HostMeta;
+    this.callbacks.status?.('starting', seat.role === 'host' ? 'Opening a room…' : 'Starting secure connection…');
+    void this.open();
   }
 
-  static createHost(name: string, code = safeCode(), callbacks: RoomCallbacks = {}, settings: RoomSettings = { rules: 'friendly' }) {
-    return new ScrabbleRoom(code, 'host', randomToken(), name.trim() || 'Host', callbacks, settings);
+  static async createHost(name: string, code = safeCode(), callbacks: RoomCallbacks = {}, settings: RoomSettings = { rules: 'friendly' }) {
+    return new ScrabbleRoom(await createSeat(APP, 'host', name.trim() || 'Host', code), callbacks, settings);
   }
-
-  static join(code: string, name: string, token = randomToken(), callbacks: RoomCallbacks = {}) {
-    return new ScrabbleRoom(code.trim().toUpperCase(), 'guest', token, name.trim() || 'Player', callbacks, { rules: 'friendly' });
+  static async join(code: string, name: string, callbacks: RoomCallbacks = {}) {
+    return new ScrabbleRoom(await createSeat(APP, 'guest', name.trim() || 'Player', code), callbacks, { rules: 'friendly' });
   }
-
   static restore(snapshot: RoomSnapshot, callbacks: RoomCallbacks = {}) {
-    return new ScrabbleRoom(snapshot.code, snapshot.role, snapshot.token, snapshot.name, callbacks, snapshot.settings, snapshot);
+    return new ScrabbleRoom(snapshot.seat, callbacks, snapshot.settings, snapshot);
   }
 
+  get code() { return this.seat.code; }
+  get role() { return this.seat.role; }
+  get token() { return this.seat.token; }
+  get name() { return this.seat.name; }
   get members() { return this.membersList.slice(); }
   get isStarted() { return this.started; }
   get rules() { return this.settings.rules; }
   get snapshot(): RoomSnapshot {
-    return { code: this.code, role: this.role, token: this.token, name: this.name, members: this.members, started: this.started, settings: { ...this.settings } };
+    return { code: this.code, role: this.role, token: this.token, name: this.name, members: this.members, started: this.started, settings: { ...this.settings }, seat: this.seat };
   }
 
-  private report(status: ConnectionStatus, message: string) { this.callbacks.status?.(status, message); }
-
-  private bindPeer() {
-    this.report('starting', this.role === 'host' ? 'Opening a room…' : 'Starting secure connection…');
-    this.peer.on('open', () => {
-      if (this.role === 'host') {
-        this.report('open', `Room ${this.code} is ready.`);
-        this.callbacks.members?.(this.members, this.started, this.settings);
-      } else {
-        this.report('connecting', `Joining room ${this.code}…`);
-        this.connectGuest();
-      }
-      this.heartbeat = window.setInterval(() => this.connections.forEach(connection => {
-        if (connection.open) this.send(connection, { type: 'ping', at: Date.now() });
-      }), 20_000);
-    });
-    this.peer.on('connection', (connection: DataConnection) => this.bindConnection(connection, false));
-    this.peer.on('error', error => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.report('error', message);
-      this.callbacks.error?.(message);
-    });
-    this.peer.on('disconnected', () => {
-      if (this.closing) return;
-      this.report('connecting', 'Reconnecting to the signaling service…');
-      this.peer.reconnect();
-    });
-    this.peer.on('close', () => this.report('closed', 'The room connection closed.'));
-  }
-
-  private connectGuest() {
-    if (this.role !== 'guest' || this.peer.destroyed) return;
-    if (this.guestRetryTimer) window.clearTimeout(this.guestRetryTimer);
-    this.guestRetryTimer = undefined;
-    this.guestAttempts++;
-    const connection = this.peer.connect(peerIdFor(this.code), { reliable: true, metadata: { version: 1, code: this.code, token: this.token, name: this.name } });
-    this.bindConnection(connection, true);
-    this.guestRetryTimer = window.setTimeout(() => {
-      if (connection.open || this.peer.destroyed) return;
-      connection.close();
-      if (this.guestAttempts < 4) {
-        this.report('connecting', `The room is taking a moment — retrying (${this.guestAttempts})…`);
-      } else {
-        this.report('error', `Still trying to reach room ${this.code}. Keep the host tab open.`);
-        this.callbacks.error?.(`Still trying to reach room ${this.code}. Keep the host tab open.`);
-      }
-      this.scheduleGuestReconnect();
-    }, 8_000);
-  }
-
-  private scheduleGuestReconnect(delay = 750) {
-    if (this.role !== 'guest' || this.closing || this.peer.destroyed) return;
-    if (this.guestRetryTimer) window.clearTimeout(this.guestRetryTimer);
-    this.guestRetryTimer = window.setTimeout(() => {
-      this.guestRetryTimer = undefined;
-      this.connectGuest();
-    }, delay);
-  }
-
-  private bindConnection(connection: DataConnection, outgoing: boolean) {
-    connection.on('open', () => {
-      const metadata = (connection.metadata || {}) as Partial<Extract<WireMessage, { type: 'hello' }>>;
-      if (this.role === 'guest' && outgoing) {
-        this.guestAttempts = 0;
-        if (this.guestRetryTimer) window.clearTimeout(this.guestRetryTimer);
-        this.guestRetryTimer = undefined;
-        this.connections.set('host', connection);
-        this.send(connection, { type: 'hello', version: 1, code: this.code, token: this.token, name: this.name });
-      }
-      if (this.role === 'host' && !outgoing) {
-        const token = String(metadata.token || '');
-        const name = String(metadata.name || 'Player').slice(0, 20);
-        const returningMember = this.membersList.find(member => member.token === token);
-        const cannotJoin = !returningMember && (this.started || this.membersList.length >= 4);
-        if (!token || metadata.code !== this.code || cannotJoin) {
-          this.send(connection, { type: 'reject', message: this.started ? 'This game has already started.' : 'This room is full.' });
-          connection.close();
-          return;
-        }
-        const previous = this.connections.get(token);
-        if (previous && previous !== connection) {
-          this.connections.delete(token);
-          previous.close();
-        }
-        this.connections.set(token, connection);
-        if (returningMember) {
-          returningMember.name = name;
-          returningMember.connected = true;
-        } else {
-          this.membersList.push({ token, name, isHost: false, connected: true });
-        }
-        this.send(connection, { type: 'welcome', members: this.members, started: this.started, settings: this.settings });
-        this.broadcastLobby();
-        this.callbacks.members?.(this.members, this.started, this.settings);
-        this.report('ready', returningMember ? `${name} reconnected.` : `${name} joined the room.`);
-      }
-      if (this.role === 'guest') this.report('ready', `Connected to ${this.code}.`);
-    });
-    connection.on('data', raw => this.handleMessage(connection, raw as WireMessage));
-    connection.on('close', () => {
-      for (const [token, candidate] of this.connections) if (candidate === connection) {
-        this.connections.delete(token);
-        const member = this.membersList.find(item => item.token === token);
-        if (member) member.connected = false;
-        this.callbacks.members?.(this.members, this.started, this.settings);
-        this.report('closed', member ? `${member.name} disconnected.` : 'A player disconnected.');
-      }
-      if (this.role === 'guest' && outgoing && !this.closing && !this.peer.destroyed) {
-        this.report('connecting', 'The host connection was interrupted — reconnecting…');
-        this.scheduleGuestReconnect();
-      }
-    });
-    connection.on('error', error => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.callbacks.error?.(message);
-      if (this.role === 'guest' && outgoing && !connection.open) this.scheduleGuestReconnect(500);
-    });
-  }
-
-  private send(connection: DataConnection, message: WireMessage) {
-    if (connection.open) connection.send(message);
-  }
-
-  private handleMessage(connection: DataConnection, message: WireMessage) {
-    if (!message || typeof message !== 'object') return;
-    if (message.type === 'ping') { this.send(connection, { type: 'pong', at: message.at }); return; }
-    if (message.type === 'pong') return;
-    if (this.role === 'host') {
-      if (message.type === 'action') {
-        const token = [...this.connections.entries()].find(([, candidate]) => candidate === connection)?.[0];
-        if (token) this.callbacks.action?.(token, message.action);
-      }
-      return;
+  private async open() {
+    try {
+      const room = await Room.open(this.seat, {
+        seats: MAX_SEATS,
+        locked: this.role === 'host' && this.started,
+        members: this.membersList.filter(m => m.token !== this.token).map(m => ({ token: m.token, name: m.name, role: m.isHost ? 'host' : 'guest' })),
+        settings: window.SCRABBLE_CONNECTION,
+        transports: import.meta.env.DEV && new URLSearchParams(location.hash.slice(1)).get('transport') === 'local' ? { local: true, direct: false, relay: false } : undefined,
+      }, {
+        status: s => this.callbacks.status?.(STATUS[s.kind] ?? 'connecting', s.text, s.path),
+        members: list => this.roster(list),
+        data: env => {
+          if (this.role === 'host' && env.channel === 'action') {
+            const message = env.data as ActionMessage;
+            if (message && typeof message === 'object' && message.action) this.callbacks.action?.(env.from, message.action, message.id ?? env.id);
+          } else if (this.role === 'guest' && env.channel === 'state') this.callbacks.state?.(env.data);
+        },
+        error: text => this.callbacks.error?.(text),
+      });
+      if (this.closed) { room.close(false); return; }
+      this.room = room;
+      for (const task of this.queue) task();
+      this.queue = [];
+    } catch (error) {
+      this.callbacks.error?.(error instanceof Error ? error.message : String(error));
     }
-    if (message.type === 'welcome' || message.type === 'lobby') {
-      this.membersList = message.members;
-      this.started = message.started;
-      this.settings = message.settings || this.settings;
-      this.callbacks.members?.(this.members, this.started, this.settings);
-      return;
+  }
+  private roster(list: Member[]) {
+    const host = list.find(member => member.role === 'host');
+    if (this.role === 'guest' && host?.meta && typeof host.meta === 'object') {
+      const meta = host.meta as Partial<HostMeta>;
+      if (typeof meta.started === 'boolean') this.started = meta.started;
+      if (meta.rules === 'friendly' || meta.rules === 'official') this.settings = { rules: meta.rules };
     }
-    if (message.type === 'state') this.callbacks.state?.(message.state);
-    if (message.type === 'reject') this.callbacks.error?.(message.message);
+    this.membersList = list.map(member => ({ token: member.token, name: member.name, isHost: member.role === 'host', connected: member.token === this.token || member.online }));
+    this.callbacks.members?.(this.members, this.started, this.settings);
   }
-
-  private broadcastLobby() {
-    const message: WireMessage = { type: 'lobby', members: this.members, started: this.started, settings: this.settings };
-    this.connections.forEach(connection => this.send(connection, message));
-  }
+  private whenOpen(task: () => void) { if (this.room) task(); else this.queue.push(task); }
 
   start() {
     if (this.role !== 'host') return;
     this.started = true;
-    this.broadcastLobby();
+    this.whenOpen(() => { this.room!.setMeta({ started: true, rules: this.settings.rules } satisfies HostMeta); this.room!.lock(); });
     this.callbacks.members?.(this.members, true, this.settings);
   }
-
   setRules(rules: RulesMode) {
     if (this.role !== 'host' || this.started) return;
     this.settings = { rules };
-    this.broadcastLobby();
+    this.whenOpen(() => this.room!.setMeta({ started: false, rules } satisfies HostMeta));
     this.callbacks.members?.(this.members, false, this.settings);
   }
-
+  /** Host: each guest receives its own redacted view. The latest view per guest is what a returning guest gets. */
   broadcastState(stateFor: (token: string) => unknown) {
     if (this.role !== 'host') return;
-    this.connections.forEach((connection, token) => this.send(connection, { type: 'state', state: stateFor(token) }));
+    this.whenOpen(() => { for (const member of this.membersList) if (!member.isHost) this.room!.send(stateFor(member.token), { channel: 'state', to: member.token }); });
   }
-
   sendAction(action: Action) {
     if (this.role !== 'guest') return;
-    const connection = [...this.connections.values()][0];
-    if (connection) this.send(connection, { type: 'action', action });
+    const message: ActionMessage = { id: crypto.randomUUID(), action };
+    this.whenOpen(() => this.room!.send(message, { channel: 'action' }));
   }
-
+  /** Leave for good: tells the table and clears what was retained for this seat. */
   close() {
-    if (this.closing) return;
-    this.closing = true;
-    if (this.heartbeat) window.clearInterval(this.heartbeat);
-    if (this.guestRetryTimer) window.clearTimeout(this.guestRetryTimer);
-    this.connections.forEach(connection => connection.close());
-    this.peer.destroy();
+    if (this.closed) return;
+    this.closed = true;
+    this.room?.close(true);
   }
 }
 

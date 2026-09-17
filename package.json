@@ -1,7 +1,7 @@
 {
   "name": "game-scrabble",
-  "version": "1.0.3",
-  "description": "A peer-to-peer Scrabble room for 2–4 players",
+  "version": "1.1.0",
+  "description": "A peer-to-peer Scrabble room for 2\u20134 players",
   "private": true,
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5197 --strictPort",
@@ -12,6 +12,7 @@
   },
   "type": "module",
   "dependencies": {
+    "peer-room": "github:krafugo/peer-room#v1.0.1",
     "peerjs": "^1.5.5",
     "scrabble-dictionary": "^1.0.2"
   },
