@@ -12,6 +12,7 @@
   },
   "type": "module",
   "dependencies": {
+    "peer-room": "github:krafugo/peer-room#v1.0.1",
     "peerjs": "^1.5.5",
     "scrabble-dictionary": "^1.0.2"
   },

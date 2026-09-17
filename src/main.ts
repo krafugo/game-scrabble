@@ -1,6 +1,7 @@
 import './style.css';
 import { applyAction, createGame, premiumAt, publicState, TILE_VALUES, type Action, type GameState, type Placement, type PublicState, type RulesMode } from './scrabble';
 import { makeRoomInvite, ScrabbleRoom, type RoomMember, type RoomSettings, type RoomSnapshot } from './network';
+import { SeatStore } from 'peer-room';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root is missing.');
@@ -18,11 +19,22 @@ let inviteBootstrapped = false;
 let restoringSession = false;
 
 type SavedSession = {
-  version: 2;
+  version: 3;
   room: RoomSnapshot;
   engine: GameState | null;
   view: PublicState | null;
+  /** Host: the id of the last action applied per player, so a retained action replayed after a reload is ignored. */
+  applied: Record<string, string>;
+  savedAt: number;
 };
+// The room lives in localStorage so a killed tab, a backgrounded phone or a reopened invite link rejoins the same seat.
+const storage = SeatStore.pick();
+const SESSION_TTL = 7 * 24 * 60 * 60 * 1000;
+// Dev only: `#seat=<name>` keeps several seats of one browser apart while testing a table in multiple tabs.
+const devSeat = import.meta.env.DEV ? new URLSearchParams(location.hash.slice(1)).get('seat') : null;
+const sessionKey = 'scrabble-session' + (devSeat ? ':' + devSeat : '');
+const roomHashFor = (code: string) => `#room=${encodeURIComponent(code)}${devSeat ? `&seat=${encodeURIComponent(devSeat)}` : ''}`;
+let applied: Record<string, string> = {};
 
 const esc = (value: unknown) => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character] || character);
 const setNotice = (message: string, kind: 'info' | 'error' | 'success' = 'info') => { notice = message; noticeKind = kind; render(); };
@@ -30,9 +42,8 @@ const currentViewPlayer = () => view?.players.find(player => player.token === ro
 const isMyTurn = () => !!view && !!room && !view.finished && view.players[view.turnIndex]?.token === room.token;
 const saveSession = () => {
   if (!room) return;
-  const saved: SavedSession = { version: 2, room: room.snapshot, engine: room.role === 'host' ? engine : null, view };
-  sessionStorage.setItem('scrabble-session', JSON.stringify(saved));
-  localStorage.setItem('scrabble-player-name', room.name);
+  const saved: SavedSession = { version: 3, room: room.snapshot, engine: room.role === 'host' ? engine : null, view, applied, savedAt: Date.now() };
+  try { storage?.setItem(sessionKey, JSON.stringify(saved)); localStorage.setItem('scrabble-player-name', room.name); } catch {}
 };
 const inviteCode = () => new URLSearchParams(location.hash.slice(1)).get('room')?.trim().toUpperCase() || '';
 
@@ -52,8 +63,9 @@ function roomCallbacks() {
         if (room.role === 'host' && engine) room.broadcastState(tokenFor => publicState(engine as GameState, tokenFor));
       }
     },
-    action: (token: string, action: Action) => {
-      if (!room || room.role !== 'host' || !engine) return;
+    action: (token: string, action: Action, id: string) => {
+      if (!room || room.role !== 'host' || !engine || applied[token] === id) return;
+      applied[token] = id;
       const result = applyAction(engine, token, action);
       if (!result.ok) { setNotice(result.error, 'error'); return; }
       engine = result.state;
@@ -92,11 +104,13 @@ function render() {
 }
 
 function restoreSavedSession() {
-  const raw = sessionStorage.getItem('scrabble-session');
+  const raw = storage?.getItem(sessionKey);
   if (!raw) return false;
   try {
     const saved = JSON.parse(raw) as Partial<SavedSession>;
-    if (saved.version !== 2 || !saved.room || !/^[A-Z0-9]{6}$/.test(saved.room.code) || !saved.room.token || !saved.room.name) throw new Error('Invalid saved room');
+    if (saved.version !== 3 || !saved.room?.seat || !/^[A-Z0-9]{6}$/.test(saved.room.code) || !saved.room.token || !saved.room.name) throw new Error('Invalid saved room');
+    if (Date.now() - (saved.savedAt ?? 0) > SESSION_TTL) throw new Error('Saved room expired');
+    applied = saved.applied ?? {};
     const linkedRoom = inviteCode();
     if (linkedRoom && linkedRoom !== saved.room.code) return false;
     if (saved.room.started && saved.room.role === 'host' && !saved.engine) throw new Error('Missing host game state');
@@ -113,7 +127,7 @@ function restoreSavedSession() {
     return true;
   } catch {
     restoringSession = false;
-    sessionStorage.removeItem('scrabble-session');
+    storage?.removeItem(sessionKey);
     return false;
   }
 }
@@ -132,18 +146,19 @@ function renderHome() {
   document.querySelector<HTMLFormElement>('#join-form')?.addEventListener('submit', event => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); openGuest(String(form.get('name') || 'Player'), String(form.get('code') || '')); });
 }
 
-function openHost(name: string) {
-  room?.close(); engine = null; view = null;
-  history.replaceState(null, '', location.pathname);
-  room = ScrabbleRoom.createHost(name, undefined, roomCallbacks()); saveSession(); renderLobby(room.members, false, { rules: room.rules });
+async function openHost(name: string) {
+  room?.close(); engine = null; view = null; applied = {};
+  room = await ScrabbleRoom.createHost(name, undefined, roomCallbacks());
+  history.replaceState(null, '', location.pathname + roomHashFor(room.code));
+  saveSession(); renderLobby(room.members, false, { rules: room.rules });
 }
 
-function openGuest(name: string, code: string) {
+async function openGuest(name: string, code: string) {
   const normalized = code.trim().toUpperCase();
   if (!/^[A-Z0-9]{6}$/.test(normalized)) { setNotice('Enter the six-character room code.', 'error'); return; }
-  room?.close(); engine = null; view = null;
-  history.replaceState(null, '', `${location.pathname}#room=${encodeURIComponent(normalized)}`);
-  room = ScrabbleRoom.join(normalized, name, undefined, roomCallbacks()); saveSession(); renderLobby(room.members, false, { rules: room.rules });
+  room?.close(); engine = null; view = null; applied = {};
+  history.replaceState(null, '', location.pathname + roomHashFor(normalized));
+  room = await ScrabbleRoom.join(normalized, name, roomCallbacks()); saveSession(); renderLobby(room.members, false, { rules: room.rules });
 }
 
 function memberRows(members: RoomMember[]) {
@@ -249,7 +264,7 @@ function bindGameEvents() {
 function sendAction(action: Action) {
   if (!room || !isMyTurn()) return;
   if (room.role === 'host') {
-    roomCallbacks().action?.(room.token, action);
+    roomCallbacks().action?.(room.token, action, crypto.randomUUID());
   } else {
     room.sendAction(action); notice = 'Play sent — waiting for the host to confirm it.'; noticeKind = 'info'; renderGame();
   }
@@ -257,14 +272,13 @@ function sendAction(action: Action) {
 
 function retryConnection() {
   if (!room || room.role !== 'guest') return;
-  const { code, name } = room;
-  room.close(); room = null; engine = null; view = null; notice = 'Retrying the room connection…'; noticeKind = 'info';
-  openGuest(name, code);
+  const snapshot = room.snapshot;                                  // keep the seat: the host only admits the token it knows
+  room.close(); notice = 'Retrying the room connection…'; noticeKind = 'info';
+  room = ScrabbleRoom.restore(snapshot, roomCallbacks()); saveSession(); render();
 }
 
 function leaveRoom() {
-  room?.close(); room = null; engine = null; view = null; pending = []; pendingRackIndexes = []; exchangeSelection.clear(); sessionStorage.removeItem('scrabble-session'); history.replaceState(null, '', location.pathname); renderHome();
+  room?.close(); room = null; engine = null; view = null; applied = {}; pending = []; pendingRackIndexes = []; exchangeSelection.clear(); storage?.removeItem(sessionKey); history.replaceState(null, '', location.pathname); renderHome();
 }
 
-window.addEventListener('pagehide', () => room?.close());
 if (!restoreSavedSession()) render();
